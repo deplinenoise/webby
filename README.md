@@ -3,7 +3,7 @@
 
 Webby is a web server intended for debugging tools inside a game or other
 program with a continously running main loop. It's intended to be used when
-something tiny and don't need a lot of performance.
+all you need is something tiny and performance isn't a key concern.
 
 ## Features ##
 
