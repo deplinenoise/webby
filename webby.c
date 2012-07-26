@@ -6,39 +6,28 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <ctype.h>
+
+#if defined(__PS3__)
+#include "webby_ps3.h"
+#elif defined(_WIN32)
+#include "webby_win32.h"
+#elif defined(__XBOX__)
+#include "webby_xbox.h"
+#else
+#include "webby_unix.h"
+#endif
 
 #define WB_ALIGN_ARB(x, a) (((x) + ((a)-1)) & ~((a)-1))
-
-#if defined(__APPLE__)
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
-typedef int webby_socket_t;
-typedef socklen_t webby_socklen_t;
-#define WB_ALIGN(x) __attribute__((aligned(x)))
-#define WB_INVALID_SOCKET (-1)
-#endif
-
-#if defined(_WIN32)
-#include <winsock2.h>
-typedef SOCKET webby_socket_t;
-#define WB_ALIGN(x) __declspec(align(x))
-#define WB_INVALID_SOCKET INVALID_SOCKET
-#define snprintf _snprintf
-typedef int webby_socklen_t;
-static int strcasecmp(const char *a, const char *b)
-{
-  return _stricmp(a, b);
-}
-#endif
+#define WB_ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 
 static const char continue_header[] = "HTTP/1.1 100 Continue\r\n\r\n";
 static const size_t continue_header_len = sizeof(continue_header)-1;
 
-#define WB_ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#ifdef _MSC_VER
+/* MSVC keeps complaining about constant conditionals inside the FD_SET() macro. */
+#pragma warning(disable: 4127)
+#endif
 
 struct WebbyConnection;
 struct WebbyRequest;
@@ -91,50 +80,6 @@ struct WebbyServer
   struct WebbyConnectionPrv connections[1];
 };
 
-static int wb_socket_error(void)
-{
-#if defined(__APPLE__)
-  return errno;
-#elif defined(_WIN32)
-  return WSAGetLastError();
-#else
-#error implement me
-#endif
-}
-
-static int wb_valid_socket(webby_socket_t socket)
-{
-#if defined(__APPLE__)
-  return socket > 0;
-#elif defined(_WIN32)
-  return socket != INVALID_SOCKET;
-#else
-#error implement me
-#endif
-}
-
-static void wb_close_socket(webby_socket_t socket)
-{
-#if defined(__APPLE__)
-  close(socket);
-#elif defined(_WIN32)
-  closesocket(socket);
-#else
-#error implement me
-#endif
-}
-
-static int wb_is_blocking_error(int error)
-{
-#if defined(__APPLE__)
-  return EAGAIN == error;
-#elif defined(_WIN32)
-  return WSAEWOULDBLOCK == error;
-#else
-#error implement me
-#endif
-}
-
 static void dbg(struct WebbyServer *srv, const char *fmt, ...)
 {
   char buffer[1024];
@@ -151,22 +96,80 @@ static void dbg(struct WebbyServer *srv, const char *fmt, ...)
   }
 }
 
-static int wb_set_blocking(struct WebbyServer* server, webby_socket_t socket, int blocking)
+/* URL-decode input buffer into destination buffer.
+ * 0-terminate the destination buffer. Return the length of decoded data.
+ * form-url-encoded data differs from URI encoding in a way that it
+ * uses '+' as character for space, see RFC 1866 section 8.2.1
+ * http://ftp.ics.uci.edu/pub/ietf/html/rfc1866.txt
+ *
+ * This bit of code was taken from mongoose.
+ */
+static size_t url_decode(const char *src, size_t src_len, char *dst, size_t dst_len, int is_form_url_encoded)
 {
-  int err;
-#if defined(__APPLE__)
-  err = fcntl(socket, F_SETFL, O_NONBLOCK, !blocking);
-#elif defined(_WIN32)
-  {
-    u_long val = !blocking;
-    err = ioctlsocket(socket, FIONBIO, &val);
+  size_t i, j;
+  int a, b;
+#define HEXTOI(x) (isdigit(x) ? x - '0' : x - 'W')
+
+  for (i = j = 0; i < src_len && j < dst_len - 1; i++, j++) {
+    if (src[i] == '%' &&
+      isxdigit(* (const unsigned char *) (src + i + 1)) &&
+      isxdigit(* (const unsigned char *) (src + i + 2))) {
+        a = tolower(* (const unsigned char *) (src + i + 1));
+        b = tolower(* (const unsigned char *) (src + i + 2));
+        dst[j] = (char) ((HEXTOI(a) << 4) | HEXTOI(b));
+        i += 2;
+    } else if (is_form_url_encoded && src[i] == '+') {
+      dst[j] = ' ';
+    } else {
+      dst[j] = src[i];
+    }
   }
-#else
-#error implement me
-#endif
-  if (err)
-    dbg(server, "Couldn't enable non-blocking: %d", wb_socket_error());
-  return err;
+
+#undef HEXTOI
+
+  dst[j] = '\0'; /* Null-terminate the destination */
+
+  return j;
+}
+
+/* Pulled from mongoose */
+int WebbyFindQueryVar(const char *buf, const char *name, char *dst, int dst_len)
+{
+  const char *p, *e, *s;
+  size_t name_len;
+  int len;
+  size_t buf_len = strlen(buf);
+
+  name_len = strlen(name);
+  e = buf + buf_len;
+  len = -1;
+  dst[0] = '\0';
+
+  // buf is "var1=val1&var2=val2...". Find variable first
+  for (p = buf; p != NULL && p + name_len < e; p++)
+  {
+    if ((p == buf || p[-1] == '&') && p[name_len] == '=' && 0 == strncasecmp(name, p, name_len))
+    {
+      // Point p to variable value
+      p += name_len + 1;
+
+      // Point s to the end of the value
+      s = (const char *) memchr(p, '&', (size_t)(e - p));
+      if (s == NULL) {
+        s = e;
+      }
+      assert(s >= p);
+
+      // Decode variable into destination buffer
+      if ((size_t) (s - p) < dst_len)
+      {
+        len = (int) url_decode(p, (size_t)(s - p), dst, dst_len, 1);
+      }
+      break;
+    }
+  }
+
+  return len;
 }
 
 const char *WebbyFindHeader(struct WebbyConnection *conn, const char *name)
@@ -222,7 +225,7 @@ WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size)
 
   assert(buffer - (char*) memory <= memory_size);
 
-  server->socket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+  server->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
   dbg(server, "Server socket = %d", (int) server->socket);
 
@@ -239,7 +242,7 @@ WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size)
     setsockopt(server->socket, SOL_SOCKET, SO_LINGER, (const char*) &off, sizeof(int));
   }
 
-  if (0 != wb_set_blocking(server, server->socket, 0))
+  if (0 != wb_set_blocking(server->socket, 0))
   {
     goto error;
   }
@@ -292,11 +295,11 @@ void WebbyServerShutdown(struct WebbyServer *srv)
   memset(srv, 0, srv->memory_size);
 }
 
-static int wb_config_incoming_socket(struct WebbyServer *server, webby_socket_t socket)
+static int wb_config_incoming_socket(webby_socket_t socket)
 {
   int err;
 
-  if (0 != (err = wb_set_blocking(server, socket, 0)))
+  if (0 != (err = wb_set_blocking(socket, 0)))
   {
     return err;
   }
@@ -360,7 +363,7 @@ static int wb_on_incoming(struct WebbyServer *srv)
   srv->connection_count = connection_index + 1;
 
   /* Configure socket */
-  if (0 != wb_config_incoming_socket(srv, fd))
+  if (0 != wb_config_incoming_socket(fd))
   {
     wb_close_socket(fd);
     return 1;
@@ -470,6 +473,7 @@ static int wb_setup_request(struct WebbyServer *srv, struct WebbyConnectionPrv *
   char* lines[WEBBY_MAX_HEADERS + 2];
   int line_count;
   char* tok[16];
+  char* query_params;
   int tok_count;
 
   int i;
@@ -499,6 +503,21 @@ static int wb_setup_request(struct WebbyServer *srv, struct WebbyConnectionPrv *
   req->uri = tok[1];
   req->http_version = tok[2];
   req->content_length = 0;
+
+  /* See if there are any query parameters */
+  if (NULL != (query_params = strchr(req->uri, '?')))
+  {
+    req->query_params = query_params + 1;
+    *query_params = '\0';
+  }
+  else
+    req->query_params = NULL;
+  
+  /* Decode the URI in place */
+  {
+    size_t uri_len = strlen(req->uri);
+    url_decode(req->uri, uri_len, (char*) req->uri, uri_len + 1, /* url encoded: */ 1);
+  }
 
   /* Parse headers */
   for (i = 0; i < header_count; ++i)
@@ -639,7 +658,7 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
           if (0 == strcasecmp(expect_header, "100-continue"))
           {
             dbg(srv, "connection expects a 100 Continue header.. making him happy");
-            connection->continue_data_left = continue_header_len;
+            connection->continue_data_left = (int) continue_header_len;
             connection->state = WBC_SEND_CONTINUE;
           }
           else
@@ -687,7 +706,7 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
         connection->io_buf.used = 0;
 
         /* Switch socket to blocking mode. */
-        if (0 != wb_set_blocking(srv, connection->socket, 1))
+        if (0 != wb_set_blocking(connection->socket, 1))
         {
           connection->flags &= ~WB_ALIVE;
           return;
@@ -705,7 +724,7 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
         }
 
         /* Back to non-blocking mode */
-        if (0 != wb_set_blocking(srv, connection->socket, 0))
+        if (0 != wb_set_blocking(connection->socket, 0))
         {
           connection->flags &= ~WB_ALIVE;
         }
@@ -735,11 +754,13 @@ WebbyServerUpdate(struct WebbyServer *srv)
 {
   int i, count, err;
   webby_socket_t max_socket;
-  fd_set read_fds, write_fds;
+  fd_set read_fds, write_fds, except_fds;
+  struct timeval timeout;
 
   /* Build set of sockets to check for events */
   FD_ZERO(&read_fds);
   FD_ZERO(&write_fds);
+  FD_ZERO(&except_fds);
 
   max_socket = 0;
 
@@ -747,6 +768,7 @@ WebbyServerUpdate(struct WebbyServer *srv)
   if (srv->connection_count < srv->config.connection_max)
   {
     FD_SET(srv->socket, &read_fds);
+    FD_SET(srv->socket, &except_fds);
     max_socket = srv->socket;
   }
 
@@ -754,6 +776,7 @@ WebbyServerUpdate(struct WebbyServer *srv)
   {
     webby_socket_t socket = srv->connections[i].socket;
     FD_SET(socket, &read_fds);
+    FD_SET(socket, &except_fds);
 
     if (srv->connections[i].state == WBC_SEND_CONTINUE)
       FD_SET(socket, &write_fds);
@@ -764,12 +787,10 @@ WebbyServerUpdate(struct WebbyServer *srv)
     }
   }
 
-  err = select(max_socket + 1, &read_fds, &write_fds, NULL, NULL);
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 50;
 
-  if (err <= 0)
-  {
-    return;
-  }
+  err = select((int) (max_socket + 1), &read_fds, &write_fds, &except_fds, &timeout);
 
   /* Handle incoming connections */
   if (FD_ISSET(srv->socket, &read_fds))
@@ -818,14 +839,19 @@ static int wb_flush(struct WebbyBuffer *buf, webby_socket_t socket)
   if (buf->used)
   {
     err = send(socket, buf->data, buf->used, 0);
+    if (err != buf->used)
+    {
+      return 1;
+    }
     buf->used = 0;
   }
-  return err;
+  return 0;
 }
 
 static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, const void *data_, int len)
 {
   struct WebbyBuffer *buf = &conn->io_buf;
+  const char* data = data_;
 
   if (conn->state != WBC_SERVE)
   {
@@ -833,40 +859,33 @@ static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, con
     return 1;
   }
 
-  if (len >= buf->max)
+  if (0 == len)
   {
-    if (0 != wb_flush(buf, conn->socket))
-      return 1;
-
-    return send(conn->socket, data_, len, 0);
+    return wb_flush(buf, conn->socket);
   }
-  else
+
+  while (len > 0)
   {
-    int space;
-    int copy_size;
-    const char *data = data_;
-
-    /* Copy as much as possible to the I/O buffer. */
-    space = buf->max - buf->used;
-    copy_size = len > space ? space : len;
-
+    int buf_space = buf->max - buf->used;
+    int copy_size = len < buf_space ? len : buf_space;
     memcpy(buf->data + buf->used, data, copy_size);
     buf->used += copy_size;
+
     data += copy_size;
     len -= copy_size;
 
-    if (copy_size == 0)
+    if (buf->used == buf->max)
     {
       if (0 != wb_flush(buf, conn->socket))
         return 1;
-    }
 
-    if (len > 0)
-    {
-      assert(buf->used == buf->max);
+      if (len >= buf->max)
+      {
+        if (0 != wb_flush(buf, conn->socket))
+          return 1;
 
-      memcpy(buf->data, data, len);
-      buf->used = len;
+        return send(conn->socket, data, len, 0);
+      }
     }
   }
 

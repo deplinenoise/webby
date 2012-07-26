@@ -1,6 +1,12 @@
 #ifndef WEBBY_H
 #define WEBBY_H
 
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
    Webby - A tiny little web server for game debugging.
 */
@@ -35,6 +41,8 @@ struct WebbyRequest
   const char *uri;
   /* The HTTP version that used. */
   const char *http_version;
+  /* The query parameters passed in the URL, or NULL if none were passed. */
+  const char *query_params;
   /* The number of bytes of request body that are available via WebbyRead() */
   int content_length;
   /* The number of headers */
@@ -163,5 +171,15 @@ int WebbyPrintf(struct WebbyConnection *conn, const char *fmt, ...);
  * specified header, or NULL if it was not present.
  */
 const char *WebbyFindHeader(struct WebbyConnection *conn, const char *name);
+
+/* Helper function to look up a query parameter given a URL encoded string.
+
+   Returns the size of the returned data, or -1 if the query var wasn't found.
+ */
+int WebbyFindQueryVar(const char *query_params, const char *name, char *buffer, int buffer_size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
