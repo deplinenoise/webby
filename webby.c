@@ -10,10 +10,10 @@
 
 #if defined(__PS3__)
 #include "webby_ps3.h"
-#elif defined(_WIN32)
-#include "webby_win32.h"
 #elif defined(__XBOX__)
 #include "webby_xbox.h"
+#elif defined(_WIN32)
+#include "webby_win32.h"
 #else
 #include "webby_unix.h"
 #endif
@@ -161,7 +161,7 @@ int WebbyFindQueryVar(const char *buf, const char *name, char *dst, int dst_len)
       assert(s >= p);
 
       // Decode variable into destination buffer
-      if ((size_t) (s - p) < dst_len)
+      if ((int) (s - p) < dst_len)
       {
         len = (int) url_decode(p, (size_t)(s - p), dst, dst_len, 1);
       }
@@ -201,8 +201,8 @@ struct WebbyServer*
 WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size)
 {
   int i;
-  struct WebbyServer *server = memory;
-  char *buffer = memory;
+  struct WebbyServer *server = (struct WebbyServer*) memory;
+  char *buffer = (char*) memory;
 
   memset(buffer, 0, memory_size);
 
@@ -505,7 +505,7 @@ static int wb_setup_request(struct WebbyServer *srv, struct WebbyConnectionPrv *
   req->content_length = 0;
 
   /* See if there are any query parameters */
-  if (NULL != (query_params = strchr(req->uri, '?')))
+  if (NULL != (query_params = (char*) strchr(req->uri, '?')))
   {
     req->query_params = query_params + 1;
     *query_params = '\0';
@@ -833,25 +833,37 @@ WebbyServerUpdate(struct WebbyServer *srv)
   }
 }
 
+static int send_fully(webby_socket_t socket, const char *buffer, int size)
+{
+  while (size > 0)
+  {
+    int err = send(socket, buffer, size, 0);
+
+    if (err <= 0)
+      return 1;
+
+    buffer += err;
+    size -= err;
+  }
+
+  return 0;
+}
+
 static int wb_flush(struct WebbyBuffer *buf, webby_socket_t socket)
 {
-  int err = 0;
-  if (buf->used)
+  if (buf->used > 0)
   {
-    err = send(socket, buf->data, buf->used, 0);
-    if (err != buf->used)
-    {
+    if (0 != send_fully(socket, buf->data, buf->used))
       return 1;
-    }
-    buf->used = 0;
   }
+  buf->used = 0;
   return 0;
 }
 
 static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, const void *data_, int len)
 {
   struct WebbyBuffer *buf = &conn->io_buf;
-  const char* data = data_;
+  const char* data = (const char*) data_;
 
   if (conn->state != WBC_SERVE)
   {
@@ -884,7 +896,7 @@ static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, con
         if (0 != wb_flush(buf, conn->socket))
           return 1;
 
-        return send(conn->socket, data, len, 0);
+        return send_fully(conn->socket, data, len);
       }
     }
   }
