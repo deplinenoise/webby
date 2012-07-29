@@ -15,6 +15,7 @@ extern "C" {
 enum
 {
   WEBBY_SERVER_LOG_DEBUG    = 1 << 0,
+  WEBBY_SERVER_WEBSOCKETS   = 1 << 1
 };
 
 /* Hard limits */
@@ -61,6 +62,32 @@ struct WebbyConnection
   void *user_data;
 };
 
+enum
+{
+  WEBBY_WS_OP_CONTINUATION    = 0,
+  WEBBY_WS_OP_TEXT_FRAME      = 1,
+  WEBBY_WS_OP_BINARY_FRAME    = 2,
+  WEBBY_WS_OP_CLOSE           = 8,
+  WEBBY_WS_OP_PING            = 9,
+  WEBBY_WS_OP_PONG            = 10
+};
+
+enum
+{
+  WEBBY_WSF_FIN               = 1 << 0,
+  WEBBY_WSF_MASKED            = 1 << 1
+};
+
+struct WebbyWsFrame
+{
+  unsigned char flags;
+  unsigned char opcode;
+  unsigned char header_size;
+  unsigned char padding_;
+  unsigned char mask_key[4];
+  int           payload_length;
+};
+
 /* Configuration data required for starting a server. */
 struct WebbyServerConfig
 {
@@ -68,10 +95,10 @@ struct WebbyServerConfig
   const char *bind_address;
 
   /* The port to listen to. */
-  int listening_port;
+  unsigned short listening_port;
 
   /* Flags. Right now WEBBY_SERVER_LOG_DEBUG is the only valid flag. */
-  int flags;
+  unsigned int flags;
 
   /* Maximum number of simultaneous connections. */
   int connection_max;
@@ -97,6 +124,34 @@ struct WebbyServerConfig
    * non-zero value to have Webby send back a 404 response.
    */
   int (*dispatch)(struct WebbyConnection *connection);
+
+  /*
+   * WebSocket connection dispatcher. Called when an incoming request wants to
+   * update to a WebSocket connection.
+   *
+   * Return 0 to allow the connection.
+   * Return 1 to ignore the connection.
+   */
+  int (*ws_connect)(struct WebbyConnection *connection);
+
+  /*
+   * Called when a WebSocket connection has been established.
+   */
+  void (*ws_connected)(struct WebbyConnection *connection);
+
+  /*
+   * Called when a WebSocket connection has been closed.
+   */
+  void (*ws_closed)(struct WebbyConnection *connection);
+
+  /*
+   * Called when a WebSocket data frame is incoming.
+   *
+   * Call WebbyRead() to read the payload data.
+   *
+   * Return non-zero to close the connection.
+   */
+  int (*ws_frame)(struct WebbyConnection *connection, const struct WebbyWsFrame *frame);
 };
 
 /* Returns the amount of memory needed for the specified config. */
@@ -108,7 +163,7 @@ WebbyServerMemoryNeeded(const struct WebbyServerConfig *config);
  * to at least 8 bytes.
  */
 struct WebbyServer*
-WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size);
+WebbyServerInit(struct WebbyServerConfig *config, void *memory, size_t memory_size);
 
 /* Update the server. Call frequently (at least once per frame). */
 void
@@ -150,7 +205,7 @@ WebbyEndResponse(struct WebbyConnection *conn);
  * Read data from the request body. Only read what the client has provided (via
  * the content_length) parameter, or you will end up blocking forever.
  */
-int WebbyRead(struct WebbyConnection *conn, void *ptr, int len);
+int WebbyRead(struct WebbyConnection *conn, void *ptr, size_t len);
 
 /*
  * Write response data to the connection. If you're not using chunked encoding,
@@ -158,7 +213,7 @@ int WebbyRead(struct WebbyConnection *conn, void *ptr, int len);
  * this function multiple times as long as the total number of bytes matches up
  * with the content length.
  */
-int WebbyWrite(struct WebbyConnection *conn, const void *ptr, int len);
+int WebbyWrite(struct WebbyConnection *conn, const void *ptr, size_t len);
 
 /*
  * Convenience function to do formatted printing to a response. Only useful
@@ -176,7 +231,15 @@ const char *WebbyFindHeader(struct WebbyConnection *conn, const char *name);
 
    Returns the size of the returned data, or -1 if the query var wasn't found.
  */
-int WebbyFindQueryVar(const char *query_params, const char *name, char *buffer, int buffer_size);
+int WebbyFindQueryVar(const char *query_params, const char *name, char *buffer, size_t buffer_size);
+
+/* Begin an outgoing websocket frame */
+int
+WebbyBeginSocketFrame(struct WebbyConnection *conn, int websocket_opcode);
+
+/* End an outgoing websocket frame */
+int
+WebbyEndSocketFrame(struct WebbyConnection *conn);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,8 @@
 
 #include "webby.h"
 
+/* Copyright (c) 2012, Andreas Fredriksson < dep at defmacro dot se > */
+
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -18,11 +20,22 @@
 #include "webby_unix.h"
 #endif
 
+#define WB_WEBSOCKET_VERSION "13"
 #define WB_ALIGN_ARB(x, a) (((x) + ((a)-1)) & ~((a)-1))
 #define WB_ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 
 static const char continue_header[] = "HTTP/1.1 100 Continue\r\n\r\n";
-static const size_t continue_header_len = sizeof(continue_header)-1;
+static const size_t continue_header_len = sizeof(continue_header) - 1;
+
+static const char websocket_guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+static const size_t websocket_guid_len = sizeof(websocket_guid) - 1;
+
+static const unsigned char websocket_pong[] = { 0x80, WEBBY_WS_OP_PONG, 0x00 };
+
+static const struct WebbyHeader plain_text_headers[] =
+{
+  { "Content-Type", "text/plain" },
+};
 
 #ifdef _MSC_VER
 /* MSVC keeps complaining about constant conditionals inside the FD_SET() macro. */
@@ -37,44 +50,50 @@ enum
   WB_ALIVE                  = 1 << 0,
   WB_FRESH_CONNECTION       = 1 << 1,
   WB_CLOSE_AFTER_RESPONSE   = 1 << 2,
-  WB_CHUNKED_RESPONSE       = 1 << 3
+  WB_CHUNKED_RESPONSE       = 1 << 3,
+  WB_WEBSOCKET              = 1 << 4,
+  WB_BLOCKING               = 1 << 5
 };
 
 enum
 {
   WBC_REQUEST,
   WBC_SEND_CONTINUE,
-  WBC_SERVE
+  WBC_SERVE,
+  WBC_WEBSOCKET
 };
 
 struct WebbyBuffer
 {
   int used;
   int max;
-  char* data;
+  unsigned char* data;
 };
 
 struct WebbyConnectionPrv
 {
   struct WebbyConnection    public_data;
 
-  int                       flags;
+  unsigned short            flags;
+  unsigned short            state;    /* WBC_xxx */
   webby_socket_t            socket;
-  int                       state;    /* WBC_xxx */
 
   struct WebbyBuffer        header_buf;
   struct WebbyBuffer        io_buf;
   int                       header_body_left;
+  int                       io_data_left;
   int                       continue_data_left;
   int                       body_bytes_read;
   struct WebbyServer*       server;
+  struct WebbyWsFrame       ws_frame;
+  unsigned char             ws_opcode;
+  int                       blocking_count; /* number of times blocking has been requested */
 };
-
 
 struct WebbyServer
 {
   struct WebbyServerConfig  config;
-  int                       memory_size;
+  size_t                    memory_size;
   webby_socket_t            socket;
   int                       connection_count;
   struct WebbyConnectionPrv connections[1];
@@ -94,6 +113,39 @@ static void dbg(struct WebbyServer *srv, const char *fmt, ...)
     buffer[(sizeof buffer)-1] = '\0';
     (*srv->config.log)(buffer);
   }
+}
+
+static int make_connection_blocking(struct WebbyConnectionPrv *conn)
+{
+  if (0 == conn->blocking_count)
+  {
+    if (0 != wb_set_blocking(conn->socket, 1))
+    {
+      dbg(conn->server, "failed to switch connection to blocking");
+      conn->flags &= ~WB_ALIVE;
+      return -1;
+    }
+  }
+
+  ++conn->blocking_count;
+  return 0;
+}
+
+static int make_connection_nonblocking(struct WebbyConnectionPrv *conn)
+{
+  int count = --conn->blocking_count;
+
+  if (0 == count)
+  {
+    if (0 != wb_set_blocking(conn->socket, 1))
+    {
+      dbg(conn->server, "failed to switch connection to non-blocking");
+      conn->flags &= ~WB_ALIVE;
+      return -1;
+    }
+  }
+
+  return 0;
 }
 
 /* URL-decode input buffer into destination buffer.
@@ -133,7 +185,7 @@ static size_t url_decode(const char *src, size_t src_len, char *dst, size_t dst_
 }
 
 /* Pulled from mongoose */
-int WebbyFindQueryVar(const char *buf, const char *name, char *dst, int dst_len)
+int WebbyFindQueryVar(const char *buf, const char *name, char *dst, size_t dst_len)
 {
   const char *p, *e, *s;
   size_t name_len;
@@ -161,7 +213,7 @@ int WebbyFindQueryVar(const char *buf, const char *name, char *dst, int dst_len)
       assert(s >= p);
 
       // Decode variable into destination buffer
-      if ((int) (s - p) < dst_len)
+      if ((size_t) (s - p) < dst_len)
       {
         len = (int) url_decode(p, (size_t)(s - p), dst, dst_len, 1);
       }
@@ -170,6 +222,209 @@ int WebbyFindQueryVar(const char *buf, const char *name, char *dst, int dst_len)
   }
 
   return len;
+}
+
+enum
+{
+  BASE64_QUADS_BEFORE_LINEBREAK = 19
+};
+
+static size_t base64_bufsize(size_t input_size)
+{
+  size_t triplets = (input_size + 2) / 3;
+  size_t base_size = 4 * triplets;
+  size_t line_breaks = 2 * (triplets / BASE64_QUADS_BEFORE_LINEBREAK);
+  size_t null_termination = 1;
+  return base_size + line_breaks + null_termination;
+}
+
+static int base64_encode(char* output, size_t output_size, const unsigned char *input, size_t input_size)
+{
+  static const char enc[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="; 
+  size_t i = 0;
+  int line_out = 0;
+
+  if (output_size < base64_bufsize(input_size))
+    return 1;
+
+  while (i < input_size)
+  {
+    unsigned int idx_0, idx_1, idx_2, idx_3;
+    unsigned int i0;
+
+    i0 = (input[i]) << 16; i++;
+    i0 |= (i < input_size ? input[i] : 0) << 8; i++;
+    i0 |= (i < input_size ? input[i] : 0); i++;
+
+    idx_0 = (i0 & 0xfc0000) >> 18; i0 <<= 6;
+    idx_1 = (i0 & 0xfc0000) >> 18; i0 <<= 6;
+    idx_2 = (i0 & 0xfc0000) >> 18; i0 <<= 6;
+    idx_3 = (i0 & 0xfc0000) >> 18;
+
+    if (i - 1 > input_size)
+      idx_2 = 64;
+    if (i > input_size)
+      idx_3 = 64;
+
+    *output++ = enc[idx_0];
+    *output++ = enc[idx_1];
+    *output++ = enc[idx_2];
+    *output++ = enc[idx_3];
+
+    if (++line_out == BASE64_QUADS_BEFORE_LINEBREAK) {
+      *output++ = '\r';
+      *output++ = '\n';
+    }
+  }
+
+  *output = '\0';
+  return 0;
+}
+
+static unsigned int sha1_rol(unsigned int value, unsigned int bits)
+{
+  return ((value) << bits) | (value >> (32 - bits));
+}
+
+struct sha1 {
+  unsigned int state[5];
+  unsigned int msg_size[2];
+  unsigned int buf_used;
+  unsigned char buffer[64];
+};
+
+static void sha1_hash_block(unsigned int state[5], const unsigned char *block)
+{
+  int i;
+  unsigned int a, b, c, d, e;
+  unsigned int w[80];
+
+  /* Prepare message schedule */
+  for (i = 0; i < 16; ++i)
+    w[i] =
+      (((unsigned int)block[(i*4)+0]) << 24) |
+      (((unsigned int)block[(i*4)+1]) << 16) |
+      (((unsigned int)block[(i*4)+2]) <<  8) |
+      (((unsigned int)block[(i*4)+3]) <<  0);
+
+  for (i = 16; i < 80; ++i)
+    w[i] = sha1_rol(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+
+  /* Initialize working variables */
+  a = state[0]; b = state[1]; c = state[2]; d = state[3]; e = state[4];
+
+  /* This is the core loop for each 20-word span. */
+#define SHA1_LOOP(start, end, func, constant) \
+  for (i = (start); i < (end); ++i) \
+  { \
+    unsigned int t = sha1_rol(a, 5) + (func) + e + (constant) + w[i]; \
+    e = d; d = c; c = sha1_rol(b, 30); b = a; a = t; \
+  }
+
+  SHA1_LOOP( 0, 20, ((b & c) ^ (~b & d)),           0x5a827999)
+  SHA1_LOOP(20, 40, (b ^ c ^ d),                    0x6ed9eba1)
+  SHA1_LOOP(40, 60, ((b & c) ^ (b & d) ^ (c & d)),  0x8f1bbcdc)
+  SHA1_LOOP(60, 80, (b ^ c ^ d),                    0xca62c1d6)
+
+#undef SHA1_LOOP
+
+  /* Update state */
+  state[0] += a; state[1] += b; state[2] += c; state[3] += d; state[4] += e;
+}
+
+static void sha1_init(struct sha1 *s)
+{
+  s->state[0] = 0x67452301;
+  s->state[1] = 0xefcdab89;
+  s->state[2] = 0x98badcfe;
+  s->state[3] = 0x10325476;
+  s->state[4] = 0xc3d2e1f0;
+  s->msg_size[0] = 0;
+  s->msg_size[1] = 0;
+  s->buf_used = 0;
+}
+
+static void sha1_update(struct sha1 *s, const void *data_, int size)
+{
+  const char *data = (const char*) data_;
+  unsigned int size_lo;
+  unsigned int size_lo_orig;
+  int remain = size;
+
+  while (remain > 0)
+  {
+    int buf_space = (sizeof s->buffer) - s->buf_used;
+    int copy_size = remain < buf_space ? remain : buf_space;
+    memcpy(s->buffer + s->buf_used, data, copy_size);
+    s->buf_used += copy_size;
+    data += copy_size;
+    remain -= copy_size;
+
+    if (s->buf_used == sizeof s->buffer)
+    {
+      sha1_hash_block(s->state, s->buffer);
+      s->buf_used = 0;
+    }
+  }
+
+  size_lo = size_lo_orig = s->msg_size[1];
+  size_lo += size * 8;
+  
+  if (size_lo < size_lo_orig)
+    s->msg_size[0] += 1;
+
+  s->msg_size[1] = size_lo;
+}
+
+static void sha1_final(unsigned char digest[20], struct sha1 *s)
+{
+  unsigned char zero = 0x00;
+  unsigned char one_bit = 0x80;
+  unsigned char count_data[8];
+  int i;
+
+  /* Generate size data in bit endian format */
+  for (i = 0; i < 8; ++i)
+  {
+    unsigned int word = s->msg_size[i >> 2];
+    count_data[i] = (unsigned char) (word >> ((3 - (i & 3)) * 8));
+  }
+
+  /* Set trailing one-bit */
+  sha1_update(s, &one_bit, 1);
+
+  /* Emit null padding to to make room for 64 bits of size info in the last 512 bit block */
+  while (s->buf_used != 56)
+    sha1_update(s, &zero, 1);
+
+  /* Write size in bits as last 64-bits */
+  sha1_update(s, count_data, 8);
+
+  /* Make sure we actually finalized our last block */
+  assert(0 == s->buf_used);
+
+  /* Generate digest */
+  for (i = 0; i < 20; ++i)
+  {
+    unsigned int word = s->state[i >> 2];
+    unsigned char byte = (unsigned char) ((word >> ((3 - (i & 3)) * 8)) & 0xff);
+    digest[i] = byte;
+  }
+}
+
+static int discard_incoming_data(struct WebbyConnection* conn, int count)
+{
+  while (count > 0)
+  {
+    char buffer[1024];
+    int read_size = count > sizeof buffer ? sizeof buffer : count;
+    if (0 != WebbyRead(conn, buffer, (size_t) read_size))
+      return -1;
+
+    count -= read_size;
+  }
+
+  return 0;
 }
 
 const char *WebbyFindHeader(struct WebbyConnection *conn, const char *name)
@@ -198,11 +453,11 @@ WebbyServerMemoryNeeded(const struct WebbyServerConfig *config)
 }
 
 struct WebbyServer*
-WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size)
+WebbyServerInit(struct WebbyServerConfig *config, void *memory, size_t memory_size)
 {
   int i;
   struct WebbyServer *server = (struct WebbyServer*) memory;
-  char *buffer = (char*) memory;
+  unsigned char *buffer = (unsigned char*) memory;
 
   memset(buffer, 0, memory_size);
 
@@ -223,7 +478,7 @@ WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size)
     buffer += config->io_buffer_size;
   }
 
-  assert(buffer - (char*) memory <= memory_size);
+  assert((size_t)(buffer - (unsigned char*) memory) <= memory_size);
 
   server->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
@@ -241,6 +496,11 @@ WebbyServerInit(struct WebbyServerConfig *config, void *memory, int memory_size)
     setsockopt(server->socket, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, sizeof(int));
     setsockopt(server->socket, SOL_SOCKET, SO_LINGER, (const char*) &off, sizeof(int));
   }
+
+#ifdef __APPLE__
+  /* Don't generate SIGPIPE when writing to dead socket, we check all writes. */
+  signal(SIGPIPE, SIG_IGN);
+#endif
 
   if (0 != wb_set_blocking(server->socket, 0))
   {
@@ -318,8 +578,8 @@ static void reset_connection(struct WebbyServer *srv, struct WebbyConnectionPrv 
   conn->header_buf.max        = srv->config.request_buffer_size;
   conn->io_buf.used           = 0;
   conn->io_buf.max            = srv->config.io_buffer_size;
-  conn->flags                 = 0;
   conn->header_body_left      = 0;
+  conn->io_data_left          = 0;
   conn->continue_data_left    = 0;
   conn->body_bytes_read       = 0;
   conn->state                 = WBC_REQUEST;
@@ -376,7 +636,7 @@ static int wb_on_incoming(struct WebbyServer *srv)
   return 0;
 }
 
-static int wb_peek_request_size(const char *buf, int len)
+static int wb_peek_request_size(const unsigned char *buf, int len)
 {
   int i;
   int max = len - 3;
@@ -468,6 +728,23 @@ static void wb_close_client(struct WebbyServer *srv, struct WebbyConnectionPrv* 
   connection->flags = 0;
 }
 
+static int send_fully(webby_socket_t socket, const unsigned char *buffer, int size)
+{
+  while (size > 0)
+  {
+    int err = send(socket, (const char*) buffer, size, 0);
+
+    if (err <= 0)
+      return 1;
+
+    buffer += err;
+    size -= err;
+  }
+
+  return 0;
+}
+
+
 static int wb_setup_request(struct WebbyServer *srv, struct WebbyConnectionPrv *connection, int request_size)
 {
   char* lines[WEBBY_MAX_HEADERS + 2];
@@ -479,7 +756,7 @@ static int wb_setup_request(struct WebbyServer *srv, struct WebbyConnectionPrv *
   int i;
   int header_count;
 
-  char *buf = connection->header_buf.data;
+  char *buf = (char*) connection->header_buf.data;
   struct WebbyRequest *req = &connection->public_data.request;
 
   /* Null-terminate the request envelope by overwriting the last CRLF with 00LF */
@@ -574,7 +851,7 @@ static int wb_fill_buffer(struct WebbyServer *srv, struct WebbyBuffer *buf, webb
     }
 
     /* Read what we can into the current buffer space. */
-    err = recv(socket, buf->data + buf->used, buf_left, 0);
+    err = recv(socket, (char*) buf->data + buf->used, buf_left, 0);
 
     if (err < 0)
     {
@@ -602,6 +879,144 @@ static int wb_fill_buffer(struct WebbyServer *srv, struct WebbyBuffer *buf, webb
       buf->used += err;
     }
   }
+}
+
+static int is_websocket_request(struct WebbyConnection* conn)
+{
+  const char *hdr;
+
+  if (NULL == (hdr = WebbyFindHeader(conn, "Connection")))
+    return 0;
+
+  if (0 != strcasecmp(hdr, "Upgrade"))
+    return 0;
+
+  if (NULL == (hdr = WebbyFindHeader(conn, "Upgrade")))
+    return 0;
+
+  if (0 != strcasecmp(hdr, "websocket"))
+    return 0;
+
+  return 1;
+}
+
+static int send_websocket_upgrade(struct WebbyServer *srv, struct WebbyConnectionPrv* connection)
+{
+  const char *hdr;
+  struct sha1 sha;
+  unsigned char digest[20];
+  char output_digest[64];
+  struct WebbyHeader headers[3];
+  struct WebbyConnection *conn = &connection->public_data;
+
+  if (0 == (srv->config.flags & WEBBY_SERVER_WEBSOCKETS))
+  {
+    dbg(srv, "websockets not enabled in server config");
+    return 1;
+  }
+
+  if (NULL == (hdr = WebbyFindHeader(conn, "Sec-WebSocket-Version")))
+  {
+    dbg(srv, "Sec-WebSocket-Version header not present");
+    return 1;
+  }
+
+  if (0 != strcmp(hdr, WB_WEBSOCKET_VERSION))
+  {
+    dbg(srv, "WebSocket version %s not supported (we only do %s)", hdr, WB_WEBSOCKET_VERSION);
+    return 1;
+  }
+
+  if (NULL == (hdr = WebbyFindHeader(conn, "Sec-WebSocket-Key")))
+  {
+    dbg(srv, "Sec-WebSocket-Key header not present");
+    return 1;
+  }
+
+  /* Compute SHA1 hash of Sec-Websocket-Key + the websocket guid as required by
+   * the RFC.
+   *
+   * This handshake is bullshit. It adds zero security. Just forces me to drag
+   * in SHA1 and create a base64 encoder.
+   */
+  sha1_init(&sha);
+  sha1_update(&sha, hdr, (int) strlen(hdr));
+  sha1_update(&sha, websocket_guid, websocket_guid_len);
+  sha1_final(&digest[0], &sha);
+
+  if (0 != base64_encode(output_digest, sizeof output_digest, &digest[0], sizeof digest))
+    return 1;
+
+  headers[0].name  = "Upgrade";
+  headers[0].value = "websocket";
+  headers[1].name  = "Connection";
+  headers[1].value = "Upgrade";
+  headers[2].name  = "Sec-WebSocket-Accept";
+  headers[2].value = output_digest;
+
+  WebbyBeginResponse(&connection->public_data, 101, 0, headers, WB_ARRAY_SIZE(headers));
+  WebbyEndResponse(&connection->public_data);
+  return 0;
+}
+
+static int scan_websocket_frame(const struct WebbyBuffer *buf, struct WebbyWsFrame *frame)
+{
+  unsigned char flags = 0;
+  int len = 0;
+  unsigned int opcode = 0;
+  unsigned char* data = buf->data;
+  unsigned char* data_max = data + buf->used;
+  int i;
+  int len_bytes = 0;
+  int mask_bytes = 0;
+  unsigned char header0, header1;
+
+  if (buf->used < 2)
+    return -1;
+
+  header0 = *data++;
+  header1 = *data++;
+
+  if (header0 & 0x80)
+  {
+    flags |= WEBBY_WSF_FIN;
+  }
+
+  if (header1 & 0x80)
+  {
+    flags |= WEBBY_WSF_MASKED;
+    mask_bytes = 4;
+  }
+
+  opcode = header0 & 0xf;
+  len = header1 & 0x7f;
+
+  if (len == 126)
+    len_bytes = 2;
+  else if (len == 127)
+    len_bytes = 8;
+
+  if (data + len_bytes + mask_bytes > data_max)
+    return -1;
+
+  /* Read big endian length from length bytes (if greater than 125) */
+  for (i = 0; i < len_bytes; ++i)
+  {
+    len <<= 8;
+    len |= *data++;
+  }
+
+  /* Read mask word if present */
+  for (i = 0; i < mask_bytes; ++i)
+  {
+    frame->mask_key[i] = *data++;
+  }
+
+  frame->header_size = (unsigned char) (data - buf->data);
+  frame->flags = flags;
+  frame->opcode = (unsigned char) opcode;
+  frame->payload_length = len;
+  return 0;
 }
 
 static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv* connection)
@@ -706,13 +1121,44 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
         connection->io_buf.used = 0;
 
         /* Switch socket to blocking mode. */
-        if (0 != wb_set_blocking(connection->socket, 1))
-        {
-          connection->flags &= ~WB_ALIVE;
+        if (0 != make_connection_blocking(connection))
           return;
-        }
 
-        if (0 != (*srv->config.dispatch)(&connection->public_data))
+        connection->flags |= WB_BLOCKING;
+
+        /* Figure out if this is a request to upgrade to WebSockets */
+        if (is_websocket_request(&connection->public_data))
+        {
+          dbg(srv, "received a websocket upgrade request");
+
+          if (!srv->config.ws_connect || 0 != (*srv->config.ws_connect)(&connection->public_data))
+          {
+            dbg(srv, "user callback failed connection attempt");
+            WebbyBeginResponse(&connection->public_data, 400, -1, plain_text_headers, WB_ARRAY_SIZE(plain_text_headers));
+            WebbyPrintf(&connection->public_data, "WebSockets not supported at %s\r\n", connection->public_data.request.uri);
+            WebbyEndResponse(&connection->public_data);
+          }
+          else
+          {
+            /* OK, let's try to upgrade the connection to WebSockets */
+            if (0 != send_websocket_upgrade(srv, connection))
+            {
+              dbg(srv, "websocket upgrade failed");
+              WebbyBeginResponse(&connection->public_data, 400, -1, plain_text_headers, WB_ARRAY_SIZE(plain_text_headers));
+              WebbyPrintf(&connection->public_data, "WebSockets couldn't not be enabled\r\n");
+              WebbyEndResponse(&connection->public_data);
+            }
+            else
+            {
+              /* OK, we're now a websocket */
+              connection->flags |= WB_WEBSOCKET;
+              dbg(srv, "connection %d upgraded to websocket", (int) (connection - srv->connections));
+
+              (*srv->config.ws_connected)(&connection->public_data);
+            }
+          }
+        }
+        else if (0 != (*srv->config.dispatch)(&connection->public_data))
         {
           static const struct WebbyHeader headers[] =
           {
@@ -723,11 +1169,8 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
           WebbyEndResponse(&connection->public_data);
         }
 
-        /* Back to non-blocking mode */
-        if (0 != wb_set_blocking(connection->socket, 0))
-        {
-          connection->flags &= ~WB_ALIVE;
-        }
+        /* Back to non-blocking mode, can make the socket die. */
+        make_connection_nonblocking(connection);
 
         /* Ready for another request, unless we should close the connection. */
         if (connection->flags & WB_ALIVE)
@@ -738,12 +1181,96 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
           }
           else
           {
-            /* Reset buffer for next request. */
+            /* Reset connection for next request. */
             reset_connection(srv, connection);
-            connection->flags = WB_ALIVE;
-            connection->state = WBC_REQUEST;
+
+            if (0 == (connection->flags & WB_WEBSOCKET))
+            {
+              /* Loop back to request state */
+              connection->state = WBC_REQUEST;
+            }
+            else
+            {
+              /* Clear I/O buffer for input */
+              connection->io_buf.used = 0;
+              /* Go to the web socket serving state */
+              connection->state = WBC_WEBSOCKET;
+            }
           }
         }
+
+        break;
+      }
+
+      case WBC_WEBSOCKET: {
+
+        /* In this state, we're trying to read a websocket frame into the I/O
+         * buffer. Once we have enough data, we call the websocket frame
+         * callback and let the client read the data through WebbyRead.
+         */ 
+
+        if (WB_FILL_ERROR == wb_fill_buffer(srv, &connection->io_buf, connection->socket))
+        {
+          /* Give up on this connection */
+          connection->flags &= ~WB_ALIVE;
+          return;
+        }
+
+        if (0 != scan_websocket_frame(&connection->io_buf, &connection->ws_frame))
+        {
+          /* Nothing yet */
+          return;
+        }
+
+        connection->body_bytes_read = 0;
+        connection->io_data_left = connection->io_buf.used - connection->ws_frame.header_size;
+        dbg(srv, "%d bytes of incoming websocket data buffered", (int) connection->io_data_left);
+
+        /* Switch socket to blocking mode */
+        if (0 != make_connection_blocking(connection))
+          return;
+
+        switch (connection->ws_frame.opcode)
+        {
+          case WEBBY_WS_OP_CLOSE:
+            dbg(srv, "received websocket close request");
+            connection->flags &= ~WB_ALIVE;
+            return;
+
+          case WEBBY_WS_OP_PING:
+            dbg(srv, "received websocket ping request");
+            if (0 != send_fully(connection->socket, websocket_pong, sizeof websocket_pong))
+              connection->flags &= ~WB_ALIVE;
+            break;
+
+          default:
+            /* Dispatch frame to user handler. */
+            if (0 != (*srv->config.ws_frame)(&connection->public_data, &connection->ws_frame))
+            {
+              connection->flags &= ~WB_ALIVE;
+              return;
+            }
+        }
+
+        /* Discard any data the client didn't read to retain the socket state. */
+        if (connection->body_bytes_read < connection->ws_frame.payload_length)
+        {
+          int size = connection->ws_frame.payload_length - connection->body_bytes_read;
+          if (0 != discard_incoming_data(&connection->public_data, size))
+          {
+            connection->flags &= ~WB_ALIVE;
+            return;
+          }
+        }
+
+        reset_connection(srv, connection);
+        connection->state = WBC_WEBSOCKET;
+
+        /* Back to non-blocking mode */
+        if (0 != make_connection_nonblocking(connection))
+          return;
+
+        break;
       }
     }
   }
@@ -788,7 +1315,7 @@ WebbyServerUpdate(struct WebbyServer *srv)
   }
 
   timeout.tv_sec = 0;
-  timeout.tv_usec = 50;
+  timeout.tv_usec = 5;
 
   err = select((int) (max_socket + 1), &read_fds, &write_fds, &except_fds, &timeout);
 
@@ -820,8 +1347,15 @@ WebbyServerUpdate(struct WebbyServer *srv)
     struct WebbyConnectionPrv *connection = &srv->connections[i];
     if (0 == (connection->flags & WB_ALIVE))
     {
-      int remain = srv->connection_count - i - 1;
-      dbg(srv, "closing connection %d", i);
+      int remain;
+      dbg(srv, "closing connection %d (%08x)", i, connection->flags);
+
+      if (connection->flags & WB_WEBSOCKET)
+      {
+        (*srv->config.ws_closed)(&connection->public_data);
+      }
+
+      remain = srv->connection_count - i - 1;
       wb_close_client(srv, connection);
       memmove(&srv->connections[i], &srv->connections[i + 1], remain);
       --srv->connection_count;
@@ -831,22 +1365,6 @@ WebbyServerUpdate(struct WebbyServer *srv)
       ++i;
     }
   }
-}
-
-static int send_fully(webby_socket_t socket, const char *buffer, int size)
-{
-  while (size > 0)
-  {
-    int err = send(socket, buffer, size, 0);
-
-    if (err <= 0)
-      return 1;
-
-    buffer += err;
-    size -= err;
-  }
-
-  return 0;
 }
 
 static int wb_flush(struct WebbyBuffer *buf, webby_socket_t socket)
@@ -863,7 +1381,7 @@ static int wb_flush(struct WebbyBuffer *buf, webby_socket_t socket)
 static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, const void *data_, int len)
 {
   struct WebbyBuffer *buf = &conn->io_buf;
-  const char* data = (const char*) data_;
+  const unsigned char* data = (const unsigned char*) data_;
 
   if (conn->state != WBC_SERVE)
   {
@@ -947,7 +1465,12 @@ static const char *wb_status_text(int status_code)
   return "Unknown";
 }
 
-int WebbyBeginResponse(struct WebbyConnection *conn_pub, int status_code, int content_length, const struct WebbyHeader headers[], int header_count)
+int WebbyBeginResponse(
+    struct WebbyConnection *conn_pub,
+    int status_code,
+    int content_length,
+    const struct WebbyHeader headers[],
+    int header_count)
 {
   int i = 0;
   struct WebbyConnectionPrv *conn = (struct WebbyConnectionPrv *) conn_pub;
@@ -955,16 +1478,10 @@ int WebbyBeginResponse(struct WebbyConnection *conn_pub, int status_code, int co
   if (conn->body_bytes_read < conn->public_data.request.content_length)
   {
     int body_left = conn->public_data.request.content_length - conn->body_bytes_read;
-    dbg(conn->server, "warning: %d bytes of body data left to read; throwing it away!", body_left);
-
-    while (body_left > 0)
+    if (0 != discard_incoming_data(conn_pub, body_left))
     {
-      char buffer[1024];
-      int read_size = body_left > sizeof buffer ? sizeof buffer : body_left;
-      if (0 != WebbyRead(conn_pub, buffer, read_size))
-        return 1;
-
-      body_left -= read_size;
+      conn->flags &= ~WB_ALIVE;
+      return -1;
     }
   }
 
@@ -1014,23 +1531,101 @@ int WebbyBeginResponse(struct WebbyConnection *conn_pub, int status_code, int co
   return 0;
 }
 
-int WebbyRead(struct WebbyConnection *conn, void *ptr_, int len)
+static size_t make_websocket_header(unsigned char buffer[10], unsigned char opcode, int payload_len, int fin)
+{
+  buffer[0] = (fin ? 0x80 : 0x00) | opcode;
+
+  if (payload_len < 126)
+  {
+    buffer[1] = (unsigned char) (payload_len & 0x7f);
+    return 2;
+  }
+  else if (payload_len < 65536)
+  {
+    buffer[1] = 126;
+    buffer[2] = (unsigned char) (payload_len >> 8);
+    buffer[3] = (unsigned char) payload_len;
+    return 4;
+  }
+  else
+  {
+    buffer[1] = 127;
+    /* Ignore high 32-bits. I didn't want to require 64-bit types and typdef hell in the API. */
+    buffer[6] = (unsigned char) (payload_len >> 24);
+    buffer[7] = (unsigned char) (payload_len >> 16);
+    buffer[8] = (unsigned char) (payload_len >> 8);
+    buffer[9] = (unsigned char) payload_len;
+    return 10;
+  }
+}
+
+int
+WebbyBeginSocketFrame(struct WebbyConnection *conn_pub, int opcode)
+{
+  struct WebbyConnectionPrv *conn = (struct WebbyConnectionPrv *) conn_pub;
+
+  conn->ws_opcode = (unsigned char) opcode;
+
+  /* Switch socket to blocking mode */
+  return make_connection_blocking(conn);
+}
+
+int
+WebbyEndSocketFrame(struct WebbyConnection *conn_pub)
+{
+  struct WebbyConnectionPrv *conn = (struct WebbyConnectionPrv *) conn_pub;
+  unsigned char header[10];
+  size_t header_size;
+
+  header_size = make_websocket_header(header, conn->ws_opcode, 0, 1);
+
+  if (0 != send_fully(conn->socket, header, header_size))
+    conn->flags &= ~WB_ALIVE;
+
+  /* Switch socket to non-blocking mode */
+  return make_connection_nonblocking(conn);
+}
+
+static int read_buffered_data(int *data_left, struct WebbyBuffer* buffer, char **dest_ptr, size_t *dest_len)
+{
+  int offset, read_size;
+  int left = *data_left;
+  int len;
+
+  if (left == 0)
+    return 0;
+
+  len = *dest_len;
+  offset = buffer->used - left;
+  read_size = len > left ? left : len;
+
+  memcpy(*dest_ptr, buffer->data + offset, read_size);
+
+  (*dest_ptr) += read_size;
+  (*dest_len) -= (size_t) read_size;
+  (*data_left) -= read_size;
+
+  return read_size;
+}
+
+int WebbyRead(struct WebbyConnection *conn, void *ptr_, size_t len)
 {
   struct WebbyConnectionPrv* conn_prv = (struct WebbyConnectionPrv*) conn;
   char *ptr = (char*) ptr_;
+  int count;
+  int start_pos = conn_prv->body_bytes_read;
 
   if (conn_prv->header_body_left > 0)
   {
-    int left = conn_prv->header_body_left;
-    int offset = conn_prv->header_buf.used - left;
-    int read_size = len > left ? left : len;
+    count = read_buffered_data(&conn_prv->header_body_left, &conn_prv->header_buf, &ptr, &len);
+    conn_prv->body_bytes_read += count;
+  }
 
-    memcpy(ptr, conn_prv->header_buf.data + offset, read_size);
-
-    ptr += read_size;
-    len -= read_size;
-    conn_prv->header_body_left -= read_size;
-    conn_prv->body_bytes_read += read_size;
+  /* Read buffered websocket data */
+  if (conn_prv->io_data_left > 0)
+  {
+    count = read_buffered_data(&conn_prv->io_data_left, &conn_prv->io_buf, &ptr, &len);
+    conn_prv->body_bytes_read += count;
   }
 
   while (len > 0)
@@ -1048,17 +1643,52 @@ int WebbyRead(struct WebbyConnection *conn, void *ptr_, int len)
     conn_prv->body_bytes_read += err;
   }
 
+  if ((conn_prv->flags & WB_WEBSOCKET) && (conn_prv->ws_frame.flags & WEBBY_WSF_MASKED))
+  {
+    /* XOR outgoing data with websocket ofuscation key */
+    int i;
+    int end_pos = conn_prv->body_bytes_read;
+    const unsigned char *mask = conn_prv->ws_frame.mask_key;
+    ptr = (char*) ptr_; /* start over */
+    for (i = start_pos; i < end_pos; ++i)
+    {
+      unsigned char byte = *ptr;
+      *ptr++ = byte ^ mask[i & 3];
+    }
+  }
+
   return 0;
 }
 
-int WebbyWrite(struct WebbyConnection *conn, const void *ptr, int len)
+int WebbyWrite(struct WebbyConnection *conn, const void *ptr, size_t len)
 {
   struct WebbyConnectionPrv *conn_priv = (struct WebbyConnectionPrv *) conn;
 
-  if (conn_priv->flags & WB_CHUNKED_RESPONSE)
+  if (conn_priv->flags & WB_WEBSOCKET)
+  {
+    unsigned char header[10];
+    size_t header_size;
+    header_size = make_websocket_header(header, conn_priv->ws_opcode, len, 0);
+
+    /* Overwrite opcode to be continuation packages from here on out */
+    conn_priv->ws_opcode = WEBBY_WS_OP_CONTINUATION;
+
+    if (0 != send_fully(conn_priv->socket, header, header_size))
+    {
+      conn_priv->flags &= ~WB_ALIVE;
+      return -1;
+    }
+    if (0 != send_fully(conn_priv->socket, ptr, len))
+    {
+      conn_priv->flags &= ~WB_ALIVE;
+      return -1;
+    }
+    return 0;
+  }
+  else if (conn_priv->flags & WB_CHUNKED_RESPONSE)
   {
     char chunk_header[128];
-    int header_len = snprintf(chunk_header, sizeof chunk_header, "%x\r\n", len);
+    int header_len = snprintf(chunk_header, sizeof chunk_header, "%x\r\n", (int) len);
     wb_push(conn_priv->server, conn_priv, chunk_header, header_len);
     wb_push(conn_priv->server, conn_priv, ptr, len);
     return wb_push(conn_priv->server, conn_priv, "\r\n", 2);

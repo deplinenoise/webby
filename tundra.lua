@@ -14,6 +14,7 @@ Build {
 				CCOPTS = {
 					{ '-Wall', '-Werror' },
 					{ '-g'; Config = "*-*-debug" },
+					{ '-O2'; Config = "*-*-release" },
 				},
 			},
 		},
@@ -30,12 +31,11 @@ Build {
 	},
 	Units = function()
 		require "tundra.syntax.glob"
-		Program {
-			Name = "a.out",
-			Sources = { Glob { Dir = ".", Extensions = CFiles } },
+		local demo = Program {
+			Name = "webbydemo",
+			Sources = { "demo.c", "webby.c" },
 			Libs = { { "ws2_32.lib"; Config = "win64-msvc" } },
 		}
-
-		Default "a.out"
+		Default(demo)
 	end,
 }
