@@ -28,6 +28,15 @@ discretion if this is a problem.
   - Handle requests in your dispatch function
 - When it's time to shut down, call `WebbyServerShutdown()`
 
+## WebSocket Usage ##
+
+- Provide the `WEBBY_SERVER_WEBSOCKETS` flag at init time
+- In your `ws_connect` handler, decide to allow the upgrade request.
+- When the connection is established, your `ws_connected` handler is called. At this point, you can start sending WebSocket frames over the connection (and you can get incoming frames as well).
+- As frames come in, your `ws_frame` handler will be called. Webby doesn't try to merge frames together when the data is split into fragments, so you can be getting one binary/text frame followed by any number of continuation frames. It's up to your handler to make sense of the data and build a buffer as appropriate. The rationale is that otherwise Webby would need a lot more buffer space. To read the frame data, look at the payload size and then call `WebbyRead` to get at the data. Be careful to not read more than what is stated, or you will screw up the protocol.
+- To send WebSocket data, call `WebbyBeginSocketFrame`, passing in the type of frame (typically `WEBBY_WS_OP_TEXT_FRAME` or `WEBBY_WS_OP_BINARY_FRAME`). Then write an arbitrary amount of data using `WebbyWrite`. When you're done, call `WebbyEndSocketFrame`. Webby currently emits one WebSocket (continuation) frame for each `WebbyWrite` call (again, to reduce buffering overhead), so try to write big chunks if you can.
+- When a connection is closed, you will get a call to your `ws_closed` handler.
+
 ## Request handling ##
 
 When you configure the server, you give it a function pointer to your
