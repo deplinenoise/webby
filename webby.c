@@ -962,7 +962,7 @@ static int send_websocket_upgrade(struct WebbyServer *srv, struct WebbyConnectio
 static int scan_websocket_frame(const struct WebbyBuffer *buf, struct WebbyWsFrame *frame)
 {
   unsigned char flags = 0;
-  int len = 0;
+  unsigned int len = 0;
   unsigned int opcode = 0;
   unsigned char* data = buf->data;
   unsigned char* data_max = data + buf->used;
@@ -1002,6 +1002,9 @@ static int scan_websocket_frame(const struct WebbyBuffer *buf, struct WebbyWsFra
   /* Read big endian length from length bytes (if greater than 125) */
   for (i = 0; i < len_bytes; ++i)
   {
+    /* This will totally overflow for 64-bit values. I don't care.
+     * If you're transmitting more than 4 GB of data using Webby,
+     * seek help. */
     len <<= 8;
     len |= *data++;
   }
@@ -1015,7 +1018,7 @@ static int scan_websocket_frame(const struct WebbyBuffer *buf, struct WebbyWsFra
   frame->header_size = (unsigned char) (data - buf->data);
   frame->flags = flags;
   frame->opcode = (unsigned char) opcode;
-  frame->payload_length = len;
+  frame->payload_length = (int) len;
   return 0;
 }
 
