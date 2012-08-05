@@ -1551,6 +1551,7 @@ static size_t make_websocket_header(unsigned char buffer[10], unsigned char opco
   {
     buffer[1] = 127;
     /* Ignore high 32-bits. I didn't want to require 64-bit types and typdef hell in the API. */
+    buffer[2] = buffer[3] = buffer[4] = buffer[5] = 0;
     buffer[6] = (unsigned char) (payload_len >> 24);
     buffer[7] = (unsigned char) (payload_len >> 16);
     buffer[8] = (unsigned char) (payload_len >> 8);
