@@ -11,6 +11,7 @@ all you need is something tiny and performance isn't a key concern.
 - No threading, all I/O and serving happens on the calling thread
 - Supports socket keep-alives
 - Supports the 100-Continue scheme for file uploading
+- Basic support for WebSockets is available.
 
 Because request/response I/O is synchronous on the calling thread, performance
 will suffer when you are serving data. For the use-cases Webby is intended for,
@@ -58,7 +59,6 @@ call `WebbyEndResponse()` to finish up.
 
 ## Limitations ##
 
-- Currently no decoding is done on the request URI.
 - There is not much error checking. 
 
 ## Author ##
