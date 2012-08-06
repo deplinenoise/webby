@@ -289,7 +289,7 @@ static unsigned int sha1_rol(unsigned int value, unsigned int bits)
 struct sha1 {
   unsigned int state[5];
   unsigned int msg_size[2];
-  unsigned int buf_used;
+  size_t buf_used;
   unsigned char buffer[64];
 };
 
@@ -344,17 +344,17 @@ static void sha1_init(struct sha1 *s)
   s->buf_used = 0;
 }
 
-static void sha1_update(struct sha1 *s, const void *data_, int size)
+static void sha1_update(struct sha1 *s, const void *data_, size_t size)
 {
   const char *data = (const char*) data_;
   unsigned int size_lo;
   unsigned int size_lo_orig;
-  int remain = size;
+  size_t remain = size;
 
   while (remain > 0)
   {
-    int buf_space = (sizeof s->buffer) - s->buf_used;
-    int copy_size = remain < buf_space ? remain : buf_space;
+    size_t buf_space = (sizeof s->buffer) - s->buf_used;
+    size_t copy_size = remain < buf_space ? remain : buf_space;
     memcpy(s->buffer + s->buf_used, data, copy_size);
     s->buf_used += copy_size;
     data += copy_size;
@@ -368,7 +368,7 @@ static void sha1_update(struct sha1 *s, const void *data_, int size)
   }
 
   size_lo = size_lo_orig = s->msg_size[1];
-  size_lo += size * 8;
+  size_lo += (unsigned int) (size * 8);
   
   if (size_lo < size_lo_orig)
     s->msg_size[0] += 1;
@@ -1583,7 +1583,7 @@ WebbyEndSocketFrame(struct WebbyConnection *conn_pub)
 
   header_size = make_websocket_header(header, conn->ws_opcode, 0, 1);
 
-  if (0 != send_fully(conn->socket, header, header_size))
+  if (0 != send_fully(conn->socket, header, (int) header_size))
     conn->flags &= ~WB_ALIVE;
 
   /* Switch socket to non-blocking mode */
@@ -1599,7 +1599,7 @@ static int read_buffered_data(int *data_left, struct WebbyBuffer* buffer, char *
   if (left == 0)
     return 0;
 
-  len = *dest_len;
+  len = (int) *dest_len;
   offset = buffer->used - left;
   read_size = len > left ? left : len;
 
@@ -1634,7 +1634,7 @@ int WebbyRead(struct WebbyConnection *conn, void *ptr_, size_t len)
 
   while (len > 0)
   {
-    int err = recv(conn_prv->socket, ptr, len, 0);
+    int err = recv(conn_prv->socket, ptr, (int) len, 0);
 
     if (err < 0)
     {
@@ -1672,17 +1672,17 @@ int WebbyWrite(struct WebbyConnection *conn, const void *ptr, size_t len)
   {
     unsigned char header[10];
     size_t header_size;
-    header_size = make_websocket_header(header, conn_priv->ws_opcode, len, 0);
+    header_size = make_websocket_header(header, conn_priv->ws_opcode, (int) len, 0);
 
     /* Overwrite opcode to be continuation packages from here on out */
     conn_priv->ws_opcode = WEBBY_WS_OP_CONTINUATION;
 
-    if (0 != send_fully(conn_priv->socket, header, header_size))
+    if (0 != send_fully(conn_priv->socket, header, (int) header_size))
     {
       conn_priv->flags &= ~WB_ALIVE;
       return -1;
     }
-    if (0 != send_fully(conn_priv->socket, ptr, len))
+    if (0 != send_fully(conn_priv->socket, ptr, (int) len))
     {
       conn_priv->flags &= ~WB_ALIVE;
       return -1;
@@ -1694,12 +1694,12 @@ int WebbyWrite(struct WebbyConnection *conn, const void *ptr, size_t len)
     char chunk_header[128];
     int header_len = snprintf(chunk_header, sizeof chunk_header, "%x\r\n", (int) len);
     wb_push(conn_priv->server, conn_priv, chunk_header, header_len);
-    wb_push(conn_priv->server, conn_priv, ptr, len);
+    wb_push(conn_priv->server, conn_priv, ptr, (int) len);
     return wb_push(conn_priv->server, conn_priv, "\r\n", 2);
   }
   else
   {
-    return wb_push(conn_priv->server, conn_priv, ptr, len);
+    return wb_push(conn_priv->server, conn_priv, ptr, (int) len);
   }
 }
 
