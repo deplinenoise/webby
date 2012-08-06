@@ -133,17 +133,19 @@ static int make_connection_blocking(struct WebbyConnectionPrv *conn)
 
 static int make_connection_nonblocking(struct WebbyConnectionPrv *conn)
 {
-  int count = --conn->blocking_count;
+  int count = conn->blocking_count;
 
-  if (0 == count)
+  if (1 == count)
   {
-    if (0 != wb_set_blocking(conn->socket, 1))
+    if (0 != wb_set_blocking(conn->socket, 0))
     {
       dbg(conn->server, "failed to switch connection to non-blocking");
       conn->flags &= ~WB_ALIVE;
       return -1;
     }
   }
+
+  conn->blocking_count = count;
 
   return 0;
 }
