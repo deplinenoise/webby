@@ -51,8 +51,7 @@ enum
   WB_FRESH_CONNECTION       = 1 << 1,
   WB_CLOSE_AFTER_RESPONSE   = 1 << 2,
   WB_CHUNKED_RESPONSE       = 1 << 3,
-  WB_WEBSOCKET              = 1 << 4,
-  WB_BLOCKING               = 1 << 5
+  WB_WEBSOCKET              = 1 << 4
 };
 
 enum
@@ -145,7 +144,7 @@ static int make_connection_nonblocking(struct WebbyConnectionPrv *conn)
     }
   }
 
-  conn->blocking_count = count;
+  conn->blocking_count = count - 1;
 
   return 0;
 }
@@ -586,6 +585,7 @@ static void reset_connection(struct WebbyServer *srv, struct WebbyConnectionPrv 
   conn->body_bytes_read       = 0;
   conn->state                 = WBC_REQUEST;
   conn->public_data.user_data = NULL;
+  conn->blocking_count        = 0;
 }
 
 static int wb_on_incoming(struct WebbyServer *srv)
@@ -1129,8 +1129,6 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
         if (0 != make_connection_blocking(connection))
           return;
 
-        connection->flags |= WB_BLOCKING;
-
         /* Figure out if this is a request to upgrade to WebSockets */
         if (is_websocket_request(&connection->public_data))
         {
@@ -1416,9 +1414,6 @@ static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, con
 
       if (len >= buf->max)
       {
-        if (0 != wb_flush(buf, conn->socket))
-          return 1;
-
         return send_fully(conn->socket, data, len);
       }
     }
@@ -1684,7 +1679,7 @@ int WebbyWrite(struct WebbyConnection *conn, const void *ptr, size_t len)
       conn_priv->flags &= ~WB_ALIVE;
       return -1;
     }
-    if (0 != send_fully(conn_priv->socket, ptr, (int) len))
+    if (0 != send_fully(conn_priv->socket, (const unsigned char*) ptr, (int) len))
     {
       conn_priv->flags &= ~WB_ALIVE;
       return -1;
