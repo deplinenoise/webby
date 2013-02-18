@@ -152,7 +152,6 @@ int main(int argc, char *argv[])
 #endif
 
   memset(&config, 0, sizeof config);
-  config.bind_address = "127.0.0.1";
   config.listening_port = 8081;
   config.flags = WEBBY_SERVER_WEBSOCKETS;
   config.connection_max = 4;

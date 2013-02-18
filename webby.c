@@ -428,6 +428,60 @@ static int discard_incoming_data(struct WebbyConnection* conn, int count)
   return 0;
 }
 
+// Variation on http://stackoverflow.com/a/3120382
+static int wb_detect_public_ip_address(struct WebbyServer *srv, char* buffer, size_t len) 
+{
+  if ( len < 16 ) 
+  {
+    dbg(srv, "need at least char[16] to store ip_addr");
+    return (1);
+  }
+
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if ( sock == -1 )
+  {
+    dbg(srv, "socket() failed err=%s\n",strerror(errno));
+    return (1);
+  }
+
+  const char *kGoogleDnsIp = "8.8.8.8";
+  uint16_t kDnsPort = 53;
+  struct sockaddr_in serv;
+  memset(&serv, 0, sizeof(serv));
+
+  serv.sin_family = AF_INET;
+  serv.sin_addr.s_addr = inet_addr(kGoogleDnsIp);
+  serv.sin_port = htons(kDnsPort);
+
+  int err = connect(sock, (const struct sockaddr*) &serv, sizeof(serv));
+  if ( err == -1 )
+  {
+    dbg(srv, "connect() failed err=%s\n",strerror(errno));
+    return (1);
+  } 
+
+  struct sockaddr_in name;
+  socklen_t namelen = sizeof(name);
+  err = getsockname(sock, (struct sockaddr*) &name, &namelen);
+  if ( err == -1 )
+  {
+    dbg(srv, "getsockname() failed err=%s\n",strerror(errno));
+    return (1);
+  } 
+
+  const char *p = inet_ntop(AF_INET, &name.sin_addr, buffer, len);
+  if ( p == NULL )
+  {
+    dbg(srv, "inet_ntop() failed err=%s\n",strerror(errno));
+    return (1);
+  }
+
+  dbg(srv, "Detected primary IP address = %s", buffer);
+
+  close(sock);
+  return (0);
+}
+
 const char *WebbyFindHeader(struct WebbyConnection *conn, const char *name)
 {
   int i, count;
@@ -449,6 +503,7 @@ WebbyServerMemoryNeeded(const struct WebbyServerConfig *config)
   return
     WB_ALIGN_ARB(sizeof(struct WebbyServer), 16) +
     WB_ALIGN_ARB((config->connection_max - 1) * sizeof(struct WebbyConnection), 16) +
+    (( config->bind_address == NULL ) ? 16 : 0) +
     config->connection_max * config->request_buffer_size +
     config->connection_max * config->io_buffer_size;
 }
@@ -465,8 +520,21 @@ WebbyServerInit(struct WebbyServerConfig *config, void *memory, size_t memory_si
   server->config = *config;
   server->memory_size = memory_size;
   server->socket = WB_INVALID_SOCKET;
+  config = &server->config;
 
   buffer += WB_ALIGN_ARB(sizeof(struct WebbyServer) + sizeof(struct WebbyConnection) * (config->connection_max - 1), 16);
+
+  // Patch bind address default
+  if ( server->config.bind_address == NULL )
+  {
+    int detect_err = wb_detect_public_ip_address(server,buffer,16);
+    if ( detect_err ) 
+    {
+      goto error;
+    }
+    config->bind_address = buffer;
+    buffer += 16;
+  }
 
   for (i = 0; i < config->connection_max; ++i)
   {
