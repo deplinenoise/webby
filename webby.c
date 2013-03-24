@@ -1362,7 +1362,7 @@ WebbyServerUpdate(struct WebbyServer *srv)
 
       remain = srv->connection_count - i - 1;
       wb_close_client(srv, connection);
-      memmove(&srv->connections[i], &srv->connections[i + 1], remain);
+      memmove(&srv->connections[i], &srv->connections[i + 1], remain*sizeof(srv->connections[i]));
       --srv->connection_count;
     }
     else
