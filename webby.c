@@ -1329,7 +1329,7 @@ WebbyServerUpdate(struct WebbyServer *srv)
   {
     do
     {
-      dbg(srv, "awake on incoming", i);
+      dbg(srv, "awake on incoming");
       err = wb_on_incoming(srv);
     } while (0 == err);
   }
