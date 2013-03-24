@@ -1183,6 +1183,7 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
           if (connection->flags & WB_CLOSE_AFTER_RESPONSE)
           {
             connection->flags &= ~WB_ALIVE;
+            return;
           }
           else
           {
@@ -1245,7 +1246,10 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
           case WEBBY_WS_OP_PING:
             dbg(srv, "received websocket ping request");
             if (0 != send_fully(connection->socket, websocket_pong, sizeof websocket_pong))
+            {
               connection->flags &= ~WB_ALIVE;
+              return;
+            }
             break;
 
           default:
