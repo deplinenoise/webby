@@ -1004,6 +1004,7 @@ static int scan_websocket_frame(const struct WebbyBuffer *buf, struct WebbyWsFra
     return -1;
 
   /* Read big endian length from length bytes (if greater than 125) */
+  len = len_bytes == 0 ? len : 0;
   for (i = 0; i < len_bytes; ++i)
   {
     /* This will totally overflow for 64-bit values. I don't care.
