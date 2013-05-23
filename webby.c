@@ -418,7 +418,7 @@ static int discard_incoming_data(struct WebbyConnection* conn, int count)
   while (count > 0)
   {
     char buffer[1024];
-    int read_size = count > sizeof buffer ? sizeof buffer : count;
+    int read_size = count > (int) sizeof buffer ? (int) sizeof buffer : count;
     if (0 != WebbyRead(conn, buffer, (size_t) read_size))
       return -1;
 
@@ -771,7 +771,7 @@ static int wb_setup_request(struct WebbyServer *srv, struct WebbyConnectionPrv *
 
   header_count = line_count - 2;
 
-  if (line_count < 1 || header_count > WB_ARRAY_SIZE(req->headers))
+  if (line_count < 1 || header_count > (int) WB_ARRAY_SIZE(req->headers))
     return 1;
 
   /* Parse request line */
@@ -1464,7 +1464,7 @@ static const char* status_text[] = {
 static const char *wb_status_text(int status_code)
 {
   int i;
-  for (i = 0; i < WB_ARRAY_SIZE(status_nums); ++i)
+  for (i = 0; i < (int) WB_ARRAY_SIZE(status_nums); ++i)
   {
     if (status_nums[i] == status_code)
       return status_text[i];

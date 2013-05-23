@@ -3,7 +3,12 @@
 
 typedef SOCKET webby_socket_t;
 
+#if defined(__GNUC__)
+#define WB_ALIGN(x) __attribute__((aligned(x)))
+#else
 #define WB_ALIGN(x) __declspec(align(x))
+#endif
+
 #define WB_INVALID_SOCKET INVALID_SOCKET
 #define snprintf _snprintf
 
@@ -14,6 +19,7 @@ static int wb_socket_error(void)
   return WSAGetLastError();
 }
 
+#if !defined(__GNUC__)
 static int strcasecmp(const char *a, const char *b)
 {
   return _stricmp(a, b);
@@ -23,6 +29,7 @@ static int strncasecmp(const char *a, const char *b, size_t len)
 {
   return _strnicmp(a, b, len);
 }
+#endif
 
 static int wb_set_blocking(webby_socket_t socket, int blocking)
 {
