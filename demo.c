@@ -103,7 +103,7 @@ static int test_ws_frame(struct WebbyConnection *connection, const struct WebbyW
   {
     unsigned char buffer[16];
     int remain = frame->payload_length - i;
-    size_t read_size = remain > sizeof buffer ? sizeof buffer : (size_t) remain;
+    size_t read_size = remain > (int) sizeof buffer ? sizeof buffer : (size_t) remain;
     size_t k;
 
     printf("%08x ", (int) i);
