@@ -885,14 +885,39 @@ static int wb_fill_buffer(struct WebbyServer *srv, struct WebbyBuffer *buf, webb
   }
 }
 
+/* Case insensitive search headers like "keep-alive, Upgrade". */
+static int hdr_has_token(const char *hdr, const char *token)
+{
+  size_t token_len = strlen(token);
+
+  for (;;)
+  {
+    if (0 == strncasecmp(hdr, token, token_len))
+      return 1;
+
+    hdr = strchr(hdr, ',');
+    if (NULL == hdr)
+      return 0;
+
+    ++hdr;
+    while (isspace(*hdr))
+      ++hdr;
+  }
+}
+
 static int is_websocket_request(struct WebbyConnection* conn)
 {
   const char *hdr;
 
+  /* "If the response lacks a |Connection| header field or the
+   * |Connection| header field doesn't contain a token that is an
+   * ASCII case-insensitive match for the value "Upgrade", the client
+   * MUST _Fail the WebSocket Connection_." RFC 6455 section 4.1
+   */
   if (NULL == (hdr = WebbyFindHeader(conn, "Connection")))
     return 0;
 
-  if (0 != strcasecmp(hdr, "Upgrade"))
+  if (0 == hdr_has_token(hdr, "Upgrade"))
     return 0;
 
   if (NULL == (hdr = WebbyFindHeader(conn, "Upgrade")))
