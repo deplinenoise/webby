@@ -34,5 +34,9 @@ static int wb_is_blocking_error(int error)
 
 static int wb_set_blocking(webby_socket_t socket, int blocking)
 {
-  return fcntl(socket, F_SETFL, O_NONBLOCK, !blocking);
+  int flags = fcntl(socket, F_GETFL);
+  if (blocking)
+    return fcntl(socket, F_SETFL, flags & ~O_NONBLOCK);
+  else
+    return fcntl(socket, F_SETFL, flags | O_NONBLOCK);
 }
