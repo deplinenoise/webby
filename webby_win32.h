@@ -1,5 +1,6 @@
 
 #include <winsock2.h>
+#include <windows.h>
 
 typedef SOCKET webby_socket_t;
 
@@ -50,4 +51,9 @@ static void wb_close_socket(webby_socket_t socket)
 static int wb_is_blocking_error(int error)
 {
   return WSAEWOULDBLOCK == error;
+}
+
+static int wb_sleep(int time)
+{
+   Sleep(time);
 }

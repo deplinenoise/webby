@@ -736,8 +736,17 @@ static int send_fully(webby_socket_t socket, const unsigned char *buffer, int si
 {
   while (size > 0)
   {
-    int err = send(socket, (const char*) buffer, size, 0);
-
+    int err;
+send_fully_retry:
+    err = send(socket, (const char*) buffer, size, 0);
+    if(err == -1)
+    {
+      if(wb_is_blocking_error(errno))
+      {
+        wb_sleep(1);
+        goto send_fully_retry;
+      }
+    }
     if (err <= 0)
       return 1;
 
@@ -1419,7 +1428,7 @@ static int wb_push(struct WebbyServer *srv, struct WebbyConnectionPrv *conn, con
       if (0 != wb_flush(buf, conn->socket))
         return 1;
 
-      if (len >= buf->max)
+      if (len <= buf->max)
       {
         return send_fully(conn->socket, data, len);
       }

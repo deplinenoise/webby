@@ -40,3 +40,8 @@ static int wb_set_blocking(webby_socket_t socket, int blocking)
   else
     return fcntl(socket, F_SETFL, flags | O_NONBLOCK);
 }
+
+static int wb_sleep(int time)
+{
+   usleep(time);
+}
