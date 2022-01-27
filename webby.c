@@ -1289,6 +1289,12 @@ static void wb_update_client(struct WebbyServer *srv, struct WebbyConnectionPrv*
 void
 WebbyServerUpdate(struct WebbyServer *srv)
 {
+  WebbyServerUpdateTimeout(srv, 0);
+}
+
+void
+WebbyServerUpdateTimeout(struct WebbyServer *srv, int timeout_ms)
+{
   int i, count, err;
   webby_socket_t max_socket;
   fd_set read_fds, write_fds, except_fds;
@@ -1324,8 +1330,16 @@ WebbyServerUpdate(struct WebbyServer *srv)
     }
   }
 
-  timeout.tv_sec = 0;
-  timeout.tv_usec = 5;
+  if (0 < timeout_ms)
+  {
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+  }
+  else
+  {
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 5;
+  }
 
   err = select((int) (max_socket + 1), &read_fds, &write_fds, &except_fds, &timeout);
 

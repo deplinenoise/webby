@@ -169,6 +169,14 @@ WebbyServerInit(struct WebbyServerConfig *config, void *memory, size_t memory_si
 void
 WebbyServerUpdate(struct WebbyServer *srv);
 
+/*
+ * Update the server. Call frequently (at least once per frame).
+ *
+ * The function will wait IOs for at most the specified timeout.
+ */
+void
+WebbyServerUpdateTimeout(struct WebbyServer *srv, int timeout_ms);
+
 /* Shutdown the server and close all sockets. */
 void
 WebbyServerShutdown(struct WebbyServer *srv);
