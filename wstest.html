@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+    <script type="text/javascript">
+        let ws;
+
+        function connect(){
+            ws = new WebSocket("ws://127.0.0.1:8081/wstest");
+            
+            ws.onopen = function() {
+                console.log("Connected");
+                ws.send("Hello Server");
+            };
+
+            ws.onmessage = function(evt) { 
+                var received_msg = evt.data;
+                // console.log("Message received: " + received_msg);
+                document.getElementById("messages").innerHTML = received_msg;
+            };
+
+            ws.onclose = function() { 
+                console.log("Connection closed"); 
+            };
+        }
+
+        function disconnect(){
+            if(ws){
+                ws.close();
+                ws = null;
+            }
+        }
+    </script>
+</head>
+<body>
+    <h1>WebSocket Test</h1>
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+    <div id="messages" style="margin-top: 20px; border: 1px solid #ccc; padding: 10px;">
+        <strong>Messages:</strong><br>
+    </div>
+</body>
+</html>
+

@@ -208,7 +208,7 @@ int main(int argc, char *argv[])
       for (i = 0; i < ws_connection_count; ++i)
       {
         WebbyBeginSocketFrame(ws_connections[i], WEBBY_WS_OP_TEXT_FRAME);
-        WebbyPrintf(ws_connections[i], "Hello world over websockets!\n");
+        WebbyPrintf(ws_connections[i], "Hello world over websockets! frame: %d\n", frame_counter);
         WebbyEndSocketFrame(ws_connections[i]);
       }
     }
